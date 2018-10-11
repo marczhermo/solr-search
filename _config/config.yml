@@ -1,0 +1,10 @@
+---
+Name: solrcloud
+---
+SilverStripe\Admin\LeftAndMain:
+  extensions:
+    - Marcz\Solr\SolrAdminExtension
+
+Marcz\Search\Processor\Exporter:
+  extensions:
+    - Marcz\Solr\Extensions\Exporter
