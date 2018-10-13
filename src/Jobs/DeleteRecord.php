@@ -4,7 +4,7 @@ namespace Marcz\Solr\Jobs;
 
 use Symbiote\QueuedJobs\Services\AbstractQueuedJob;
 use Symbiote\QueuedJobs\Services\QueuedJob;
-use Marcz\Solr\ElasticClient;
+use Marcz\Solr\SolrClient;
 use Exception;
 
 class DeleteRecord extends AbstractQueuedJob implements QueuedJob

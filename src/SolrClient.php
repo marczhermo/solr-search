@@ -11,11 +11,17 @@ use Marcz\Solr\Jobs\JsonBulkExport;
 use Marcz\Solr\Jobs\JsonExport;
 use SilverStripe\ORM\DataList;
 use SilverStripe\ORM\ArrayList;
-use Marcz\Search\Config;
+use Marcz\Search\Config as SearchConfig;
 use Marcz\Search\Client\SearchClientAdaptor;
 use Marcz\Solr\Jobs\DeleteRecord;
+use GuzzleHttp\Ring\Client\CurlHandler;
+use GuzzleHttp\Stream\Stream;
+use GuzzleHttp\Ring\Future\CompletedFutureArray;
 use Marcz\Search\Client\DataWriter;
 use Marcz\Search\Client\DataSearcher;
+use Exception;
+use SilverStripe\Dev\Debug;
+
 
 class SolrClient implements SearchClientAdaptor, DataWriter, DataSearcher
 {
@@ -35,132 +41,230 @@ class SolrClient implements SearchClientAdaptor, DataWriter, DataSearcher
             return $this->clientAPI;
         }
 
-        $host = Environment::getEnv('SS_ELASTIC_HOST');
-        $port = Environment::getEnv('SS_ELASTIC_PORT');
-        $http = Environment::getEnv('SS_ELASTIC_HTTP');
-        $user = Environment::getEnv('SS_ELASTIC_USER');
-        $pass = Environment::getEnv('SS_ELASTIC_PASS');
-        $cert = Environment::getEnv('SS_ELASTIC_CERT');
+        return $this->setClientAPI(new CurlHandler());
+    }
 
-        $conf = [];
-        if ($host) {
-            $conf['host'] = $host;
-        }
-        if ($port) {
-            $conf['port'] = $port;
-        }
-        if ($http) {
-            $conf['scheme'] = $http;
-        }
-        if ($user) {
-            $conf['user'] = $user;
-        }
-        if ($pass) {
-            $conf['pass'] = $pass;
-        }
-
-        $builder = ClientBuilder::create()->setHosts([$conf]);
-
-        if ($cert) {
-            $builder = $builder->setSSLVerification($cert);
-        }
-
-        $this->clientAPI = $builder->build();
+    public function setClientAPI($handler)
+    {
+        $this->clientAPI = $handler;
 
         return $this->clientAPI;
     }
 
     public function initIndex($indexName)
     {
-        $client = $this->createClient();
+        $this->createClient();
 
-        $this->clientIndex     = $client->indices();
         $this->clientIndexName = $indexName;
 
-        return $this->clientIndex;
+        $endPoint = Environment::getEnv('SS_SOLR_END_POINT');
+        $this->rawQuery = [
+            'http_method'   => 'GET',
+            'uri'           => parse_url($endPoint, PHP_URL_PATH),
+            'headers'       => [
+                'host'  => [parse_url($endPoint, PHP_URL_HOST)],
+                'port'  => [parse_url($endPoint, PHP_URL_PORT)],
+                'Content-Type' => ['application/json'],
+            ],
+            'client' => [
+                'curl' => [
+                    CURLOPT_SSL_VERIFYHOST => 0,
+                    CURLOPT_SSL_VERIFYPEER => false,
+                    CURLOPT_PORT => parse_url($endPoint, PHP_URL_PORT),
+                ]
+            ]
+        ];
+
+        return $this->sql();
     }
 
     public function createIndex($indexName)
     {
-        $index    = $this->initIndex($indexName);
-        $settings = ['index' => strtolower($this->clientIndexName)];
+        return ($this->hasEngine($indexName)) ? true : $this->createEngine($indexName);
+    }
 
-        try {
-            $index->create($settings);
-        } catch (\Exception $exception) {
-            $json = json_decode($exception->getMessage(), true);
-            if (!$json['status'] === 400) {
-                throw $exception;
-            }
+    public function hasEngine($indexName)
+    {
+        $data = ['action' => 'LIST'];
+        $url = sprintf(
+            '%sadmin/collections?%s',
+            parse_url(Environment::getEnv('SS_SOLR_END_POINT'), PHP_URL_PATH),
+            http_build_query($data)
+        );
+        $rawQuery = $this->initIndex($indexName);
+        $rawQuery['uri'] = $url;
+        $this->rawQuery = $rawQuery;
+        $handler = $this->clientAPI;
+        $response = $this->checkResponse($handler($rawQuery));
 
-            $error = $json['error'];
-
-            if ($error['type'] !== 'resource_already_exists_exception') {
-                throw $exception;
-            }
+        if (!isset($response['body']['collections'])) {
+            throw new Exception('Unable to get collections');
         }
 
-        return $index;
+        if (!$response['body']['collections']) {
+            return false;
+        }
+
+        return in_array(strtolower($indexName), $response['body']['collections']);
+    }
+
+    public function createEngine($indexName)
+    {
+        $indices = ArrayList::create(SearchConfig::config()->get('indices'));
+        $index = $indices->find('name', $indexName);
+
+        $data = [
+            'action' => 'CREATE',
+            'name' => strtolower($indexName),
+            'numShards' => (isset($index['numShards'])) ? $index['numShards'] : 2,
+        ];
+
+        $rawQuery = $this->initIndex($indexName);
+
+        $url = sprintf(
+            '%sadmin/collections?%s',
+            parse_url(Environment::getEnv('SS_SOLR_END_POINT'), PHP_URL_PATH),
+            http_build_query($data)
+        );
+
+        $rawQuery['uri'] = $url;
+        $this->rawQuery = $rawQuery;
+        $handler = $this->clientAPI;
+        $response = $this->checkResponse($handler($rawQuery));
+
+        return $response['status'] === 200;
+    }
+
+    public function checkResponse(CompletedFutureArray $response)
+    {
+        if (is_resource($response['body']) && get_resource_type($response['body']) === 'stream') {
+            $stream = Stream::factory($response['body']);
+            $response['body'] = $stream->getContents();
+        }
+
+        if ($response['status'] === null) {
+            if ($response['error'] instanceof Exception) {
+                throw $response['error'];
+            }
+            throw new Exception('Unknown status code');
+        }
+
+        $body = json_decode($response['body'], true);
+        if ($response['status'] >= 400) {
+            $error = sprintf(
+                '%s - %s%s',
+                $response['status'],
+                $response['reason'],
+                (isset($body['error']['msg'])) ? ', '. $body['error']['msg'] : ''
+            );
+            throw new Exception($error);
+        }
+
+        $response['body'] = $body;
+
+        return $response;
     }
 
     public function update($data)
     {
-        $indexName = strtolower($this->clientIndexName);
-        $params    = [
-            'index' => $indexName,
-            'type'  => $indexName,
-            'id'    => $data['ID'],
-            'body'  => ['upsert' => $data, 'doc' => $data]
+        $rawQuery = $this->initIndex($this->clientIndexName);
+
+        $url = sprintf(
+            '%s%s/update?commit=true',
+            parse_url(Environment::getEnv('SS_SOLR_END_POINT'), PHP_URL_PATH),
+            strtolower($this->clientIndexName)
+        );
+        $data = [
+            //'delete' => ['id' => $data['ID']], //works for delete
+            'add' => [
+                'overwrite' => true, // overwrites by 'id' (lowercase)
+                'doc' => $data,
+            ]
         ];
 
-        $this->callClientMethod('update', [$params]);
+        $rawQuery['uri'] = $url;
+        $rawQuery['body'] = json_encode($data, JSON_PRESERVE_ZERO_FRACTION);
+
+        $this->rawQuery = $rawQuery;
+        $handler = $this->clientAPI;
+        $response = $this->checkResponse($handler($rawQuery));
+        Debug::dump($response);
+
+        return $response['status'] === 200;
     }
 
     public function bulkUpdate($list)
     {
         $indexName = strtolower($this->clientIndexName);
-        $params    = [];
-        for ($i = 0; $i < count($list); $i++) {
-            $params['body'][] = [
-                'index' => [
-                    '_index' => $indexName,
-                    '_type'  => $indexName,
-                    '_id'    => $list[$i]['ID']
-                ]
-            ];
+        $rawQuery = $this->initIndex($this->clientIndexName);
 
-            $params['body'][] = $list[$i];
-        }
+        $endPoint = Environment::getEnv('SS_SOLR_END_POINT');
+        $url = sprintf(
+            '%1$sengines/%2$s/document_types/%2$s/documents/bulk_create_or_update_verbose',
+            parse_url($endPoint, PHP_URL_PATH),
+            $indexName
+        );
+        $data = [
+            'auth_token' => Environment::getEnv('SS_SOLR_AUTH_TOKEN'),
+            'documents' => $list,
+        ];
 
-        $this->callClientMethod('bulk', [$params]);
+        $rawQuery['http_method'] = 'POST';
+        $rawQuery['uri'] = $url;
+        $rawQuery['body'] = json_encode($data, JSON_PRESERVE_ZERO_FRACTION);
+
+        $this->rawQuery = $rawQuery;
+
+        $handler = $this->clientAPI;
+        $response = $handler($rawQuery);
+        $stream = Stream::factory($response['body']);
+        $response['body'] = $stream->getContents();
+
+        return isset($response['status']) && 200 === $response['status'];
     }
 
     public function deleteRecord($recordID)
     {
         $indexName = strtolower($this->clientIndexName);
-        $params    = [
-            'index' => $indexName,
-            'type'  => $indexName,
-            'id'    => $recordID,
-        ];
+        $rawQuery = $this->initIndex($this->clientIndexName);
 
-        $this->callClientMethod('delete', [$params]);
+        $endPoint = Environment::getEnv('SS_SOLR_END_POINT');
+        $url = sprintf(
+            '%1$sengines/%2$s/document_types/%2$s/documents/%3$s.json',
+            parse_url($endPoint, PHP_URL_PATH),
+            $indexName,
+            $recordID
+        );
+        $data = ['auth_token' => Environment::getEnv('SS_SOLR_AUTH_TOKEN')];
+
+        $rawQuery['http_method'] = 'DELETE';
+        $rawQuery['uri'] = $url;
+        $rawQuery['body'] = json_encode($data, JSON_PRESERVE_ZERO_FRACTION);
+
+        $this->rawQuery = $rawQuery;
+
+        $handler = $this->clientAPI;
+        $response = $handler($rawQuery);
+        $stream = Stream::factory($response['body']);
+        $response['body'] = $stream->getContents();
+
+        return isset($response['status']) && in_array($response['status'], [204, 404]);
     }
 
     public function createBulkExportJob($indexName, $className)
     {
         $list        = new DataList($className);
         $total       = $list->count();
-        $batchLength = self::config()->get('batch_length') ?: Config::config()->get('batch_length');
+        $batchLength = self::config()->get('batch_length') ?: SearchConfig::config()->get('batch_length');
         $totalPages  = ceil($total / $batchLength);
 
         $this->initIndex($indexName);
 
         for ($offset = 0; $offset < $totalPages; $offset++) {
             $job = Injector::inst()->createWithArgs(
-                    JsonBulkExport::class,
-                    [$indexName, $className, $offset * $batchLength]
-                );
+                JsonBulkExport::class,
+                [$indexName, $className, $offset * $batchLength]
+            );
 
             singleton(QueuedJobService::class)->queueJob($job);
         }
@@ -169,9 +273,9 @@ class SolrClient implements SearchClientAdaptor, DataWriter, DataSearcher
     public function createExportJob($indexName, $className, $recordId)
     {
         $job = Injector::inst()->createWithArgs(
-                JsonExport::class,
-                [$indexName, $className, $recordId]
-            );
+            JsonExport::class,
+            [$indexName, $className, $recordId]
+        );
 
         singleton(QueuedJobService::class)->queueJob($job);
     }
@@ -179,73 +283,55 @@ class SolrClient implements SearchClientAdaptor, DataWriter, DataSearcher
     public function createDeleteJob($indexName, $className, $recordId)
     {
         $job = Injector::inst()->createWithArgs(
-                DeleteRecord::class,
-                [$indexName, $className, $recordId]
-            );
+            DeleteRecord::class,
+            [$indexName, $className, $recordId]
+        );
 
         singleton(QueuedJobService::class)->queueJob($job);
     }
 
-    public function search($term = '*', $filters = [], $pageNumber = 0, $pageLength = 20)
+    public function search($term = '', $filters = [], $pageNumber = 0, $pageLength = 20)
     {
+        $term = trim($term);
         $indexName = strtolower($this->clientIndexName);
-        $term      = trim($term);
-        $term      = empty($term) ? '*' : $term;
-        $terms     = explode(' ', $term);
 
-        // Add tilde for fuzziness on first word used for autocomplete
-        if ($term !== '*' && count($terms) === 1) {
-            $term = $term . '~';
-        }
+        $this->rawQuery = $this->initIndex($this->clientIndexName);
 
-        $this->rawQuery = [
-            'index' => $indexName,
-            'type'  => $indexName,
-            'from'  => $pageNumber,
-            'size'  => $pageLength,
-            'body'  => [
-                'query' => [
-                    'bool' => [
-                        'must' => [
-                            [
-                                'query_string' => [
-                                    'query'            => $term,
-                                    'analyze_wildcard' => true,
-                                    'default_field'    => '*',
-                                    'fuzziness'        => 2,
-                                ]
-                            ],
-                        ],
-                        'filter'   => [],
-                        'should'   => [],
-                        'must_not' => [],
-                    ],
-                ],
-            ],
+        $endPoint = Environment::getEnv('SS_SOLR_END_POINT');
+        $url = sprintf(
+            '%sengines/%s/search.json',
+            parse_url($endPoint, PHP_URL_PATH),
+            $indexName
+        );
+        $data = [
+            'auth_token' => Environment::getEnv('SS_SOLR_AUTH_TOKEN'),
+            'q' => $term,
+            'document_types' => [$indexName],
+            'page' => 1 + $pageNumber,
+            'per_page' => $pageLength,
+            'filters' => [$indexName => $this->translateFilterModifiers($filters)],
+            'facets' => [$indexName => []],
         ];
 
-        $facets    = $this->rawQuery['body']['query']['bool']['must'];
-        $modifiers = $this->translateFilterModifiers($filters);
+        $indexConfig = ArrayList::create(SearchConfig::config()->get('indices'))
+                        ->find('name', $this->clientIndexName);
 
-        if (isset($modifiers['facetFilters'])) {
-            $facets = array_merge($facets, $modifiers['facetFilters']);
-
-            $this->rawQuery['body']['query']['bool']['must'] = $facets;
+        if (!empty($indexConfig['attributesForFaceting'])) {
+            $data['facets'] = [$indexName => $indexConfig['attributesForFaceting']];
         }
 
-        if (isset($modifiers['filters'])) {
-            $this->rawQuery['body']['query']['bool']['filter'] = $modifiers['filters'];
-        }
-        $response = $this->callClientMethod('search', [$this->rawQuery]);
-        $total = (int) $response['hits']['total'];
-        $this->response = ['_total' => $total] + $response;
+        $this->rawQuery['uri'] = $url;
+        $this->rawQuery['body'] = json_encode($data, JSON_PRESERVE_ZERO_FRACTION);
 
-        $hits = new ArrayList($this->response['hits']['hits']);
-        if ($total) {
-            $hits = new ArrayList($hits->column('_source'));
-        }
+        $handler = $this->clientAPI;
+        $response = $handler($this->rawQuery);
+        $stream = Stream::factory($response['body']);
+        $response['body'] = $stream->getContents();
 
-        return $hits;
+        $this->response = json_decode($response['body'], true);
+        $this->response['_total'] = $this->response['record_count'];
+
+        return new ArrayList($this->response['records'][$indexName]);
     }
 
     public function getResponse()
@@ -277,7 +363,6 @@ class SolrClient implements SearchClientAdaptor, DataWriter, DataSearcher
         }
 
         if ($forFilters) {
-            $query['filters'] = [];
             $modifiedFilter   = [];
 
             foreach ($forFilters as $filterArray) {
@@ -296,42 +381,20 @@ class SolrClient implements SearchClientAdaptor, DataWriter, DataSearcher
                 }
             }
 
-            $query['filters'] = [
-                'bool' => ['must' => $modifiedFilter]
-            ];
+            foreach ($modifiedFilter as $filter) {
+                $column = key($filter);
+                $previous = isset($query[$column]) ? $query[$column] : [];
+                $query[$column] = array_merge($previous, current($filter));
+            }
         }
 
         if ($forFacets) {
-            $query['facetFilters'] = [];
-
             foreach ($forFacets as $filterArray) {
                 foreach ($filterArray as $key => $value) {
                     if (is_array($value)) {
-                        $phrases = array_values(
-                            array_map(
-                                function ($item) use ($key) {
-                                    return [
-                                        'match_phrase' => [
-                                            $key => ['query' => $item]
-                                            ]
-                                        ];
-                                },
-                                $value
-                            )
-                        );
-
-                        $query['facetFilters'][] = [
-                                'bool' => [
-                                    'should'               => $phrases,
-                                    'minimum_should_match' => 1
-                                ]
-                            ];
+                        $query[$key] = array_values($value);
                     } else {
-                        $query['facetFilters'][] = [
-                            'match_phrase' => [
-                                $key => ['query' => $value]
-                            ]
-                        ];
+                        $query[$key] = $value;
                     }
                 }
             }
@@ -352,7 +415,7 @@ class SolrClient implements SearchClientAdaptor, DataWriter, DataSearcher
 
     public function modifyFilter($modifier, $key, $value)
     {
-        return Injector::inst()->create('Marcz\\Elastic\\Modifiers\\' . $modifier)->apply($key, $value);
+        return Injector::inst()->create('Marcz\\SOLR\\Modifiers\\' . $modifier)->apply($key, $value);
     }
 
     public function modifyFilters($modifier, $key, $values)

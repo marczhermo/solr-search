@@ -10,7 +10,7 @@ class Exporter extends Extension
     public function updateExport(&$data, &$clientClassName)
     {
         if ($clientClassName === SolrClient::class) {
-            // TODO:
+            $data['id'] = $data['ID'];
         }
     }
 }

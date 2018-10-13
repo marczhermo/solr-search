@@ -8,7 +8,7 @@ use SilverStripe\Assets\File;
 use SilverStripe\ORM\FieldType\DBDatetime;
 use SilverStripe\Core\Config\Config as FileConfig;
 use Marcz\Search\Processor\Exporter;
-use Marcz\Solr\ElasticClient;
+use Marcz\Solr\SolrClient;
 use Exception;
 use Marcz\Search\Config;
 

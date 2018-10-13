@@ -8,3 +8,14 @@ SilverStripe\Admin\LeftAndMain:
 Marcz\Search\Processor\Exporter:
   extensions:
     - Marcz\Solr\Extensions\Exporter
+
+Marcz\Search\Config:
+  clients:
+    - name: 'Solr'
+      write: true
+      delete: true
+      export: 'json'
+      class: 'Marcz\Solr\SolrClient'
+Marcz\Search\Processor\Exporter:
+  extensions:
+    - Marcz\Solr\Extensions\Exporter

@@ -5,7 +5,7 @@ namespace Marcz\Solr\Jobs;
 use Symbiote\QueuedJobs\Services\AbstractQueuedJob;
 use Symbiote\QueuedJobs\Services\QueuedJob;
 use Marcz\Search\Processor\Exporter;
-use Marcz\Solr\ElasticClient;
+use Marcz\Solr\SolrClient;
 use Exception;
 use SilverStripe\ORM\DataList;
 
@@ -63,7 +63,7 @@ class JsonExport extends AbstractQueuedJob implements QueuedJob
 
         $exporter = Exporter::create();
         $client   = $this->createClient();
-        $clientClassName = ElasticClient::class;
+        $clientClassName = SolrClient::class;
         $client->update(
             $exporter->export($record, $clientClassName)
         );
@@ -85,7 +85,7 @@ class JsonExport extends AbstractQueuedJob implements QueuedJob
     public function createClient($client = null)
     {
         if (!$client) {
-            $this->client = ElasticClient::create();
+            $this->client = SolrClient::create();
         }
 
         $this->client->initIndex($this->indexName);
