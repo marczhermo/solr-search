@@ -94,7 +94,7 @@ class JsonBulkExport extends AbstractQueuedJob implements QueuedJob
             $dateTime->URLDatetime(),
             $this->offset
         );
-        $batchLength = ElasticClient::config()->get('batch_length') ?: Config::config()->get('batch_length');
+        $batchLength = SolrClient::config()->get('batch_length') ?: Config::config()->get('batch_length');
 
         $this->bulkArray = $exporter->bulkExport($this->className, $this->offset, $batchLength, ElasticClient::class);
 
@@ -138,7 +138,7 @@ class JsonBulkExport extends AbstractQueuedJob implements QueuedJob
     public function createClient($client = null)
     {
         if (!$client) {
-            $this->client = ElasticClient::create();
+            $this->client = SolrClient::create();
         }
 
         $this->client->initIndex($this->indexName);

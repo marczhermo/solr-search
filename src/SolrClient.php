@@ -87,7 +87,7 @@ class SolrClient implements SearchClientAdaptor, DataWriter, DataSearcher
     {
         $data = ['action' => 'LIST'];
         $url = sprintf(
-            '%sadmin/collections?%s',
+            '%s/admin/collections?%s',
             parse_url(Environment::getEnv('SS_SOLR_END_POINT'), PHP_URL_PATH),
             http_build_query($data)
         );
@@ -122,7 +122,7 @@ class SolrClient implements SearchClientAdaptor, DataWriter, DataSearcher
         $rawQuery = $this->initIndex($indexName);
 
         $url = sprintf(
-            '%sadmin/collections?%s',
+            '%s/admin/collections?%s',
             parse_url(Environment::getEnv('SS_SOLR_END_POINT'), PHP_URL_PATH),
             http_build_query($data)
         );
@@ -167,30 +167,7 @@ class SolrClient implements SearchClientAdaptor, DataWriter, DataSearcher
 
     public function update($data)
     {
-        $rawQuery = $this->initIndex($this->clientIndexName);
-
-        $url = sprintf(
-            '%s%s/update?commit=true',
-            parse_url(Environment::getEnv('SS_SOLR_END_POINT'), PHP_URL_PATH),
-            strtolower($this->clientIndexName)
-        );
-        $data = [
-            //'delete' => ['id' => $data['ID']], //works for delete
-            'add' => [
-                'overwrite' => true, // overwrites by 'id' (lowercase)
-                'doc' => $data,
-            ]
-        ];
-
-        $rawQuery['uri'] = $url;
-        $rawQuery['body'] = json_encode($data, JSON_PRESERVE_ZERO_FRACTION);
-
-        $this->rawQuery = $rawQuery;
-        $handler = $this->clientAPI;
-        $response = $this->checkResponse($handler($rawQuery));
-        Debug::dump($response);
-
-        return $response['status'] === 200;
+        return $this->bulkUpdate([$data]);
     }
 
     public function bulkUpdate($list)
@@ -200,18 +177,14 @@ class SolrClient implements SearchClientAdaptor, DataWriter, DataSearcher
 
         $endPoint = Environment::getEnv('SS_SOLR_END_POINT');
         $url = sprintf(
-            '%1$sengines/%2$s/document_types/%2$s/documents/bulk_create_or_update_verbose',
+            '%1$s/%2$s/update?commit=true',
             parse_url($endPoint, PHP_URL_PATH),
             $indexName
         );
-        $data = [
-            'auth_token' => Environment::getEnv('SS_SOLR_AUTH_TOKEN'),
-            'documents' => $list,
-        ];
 
         $rawQuery['http_method'] = 'POST';
         $rawQuery['uri'] = $url;
-        $rawQuery['body'] = json_encode($data, JSON_PRESERVE_ZERO_FRACTION);
+        $rawQuery['body'] = json_encode($list, JSON_PRESERVE_ZERO_FRACTION);
 
         $this->rawQuery = $rawQuery;
 
@@ -230,16 +203,14 @@ class SolrClient implements SearchClientAdaptor, DataWriter, DataSearcher
 
         $endPoint = Environment::getEnv('SS_SOLR_END_POINT');
         $url = sprintf(
-            '%1$sengines/%2$s/document_types/%2$s/documents/%3$s.json',
+            '%1$s/%2$s/update?commit=true',
             parse_url($endPoint, PHP_URL_PATH),
-            $indexName,
-            $recordID
+            $indexName
         );
-        $data = ['auth_token' => Environment::getEnv('SS_SOLR_AUTH_TOKEN')];
 
-        $rawQuery['http_method'] = 'DELETE';
+        $rawQuery['http_method'] = 'POST';
         $rawQuery['uri'] = $url;
-        $rawQuery['body'] = json_encode($data, JSON_PRESERVE_ZERO_FRACTION);
+        $rawQuery['body'] = json_encode(['delete' => [$recordID]], JSON_PRESERVE_ZERO_FRACTION);
 
         $this->rawQuery = $rawQuery;
 
@@ -248,7 +219,7 @@ class SolrClient implements SearchClientAdaptor, DataWriter, DataSearcher
         $stream = Stream::factory($response['body']);
         $response['body'] = $stream->getContents();
 
-        return isset($response['status']) && in_array($response['status'], [204, 404]);
+        return isset($response['status']) && 200 === $response['status'];
     }
 
     public function createBulkExportJob($indexName, $className)
@@ -294,30 +265,31 @@ class SolrClient implements SearchClientAdaptor, DataWriter, DataSearcher
     {
         $term = trim($term);
         $indexName = strtolower($this->clientIndexName);
-
         $this->rawQuery = $this->initIndex($this->clientIndexName);
 
         $endPoint = Environment::getEnv('SS_SOLR_END_POINT');
         $url = sprintf(
-            '%sengines/%s/search.json',
+                '%1$s/%2$s/query',
             parse_url($endPoint, PHP_URL_PATH),
             $indexName
         );
+
         $data = [
-            'auth_token' => Environment::getEnv('SS_SOLR_AUTH_TOKEN'),
-            'q' => $term,
-            'document_types' => [$indexName],
-            'page' => 1 + $pageNumber,
-            'per_page' => $pageLength,
-            'filters' => [$indexName => $this->translateFilterModifiers($filters)],
-            'facets' => [$indexName => []],
+            'query'  => $term,
+            'params' => [
+                'debug'  => true,
+            ],
+            //'offset' => 1 + $pageNumber,
+            //'limit'  => $pageLength,
+            //'filter' => [$indexName => $this->translateFilterModifiers($filters)],
+            //'facet'  => [$indexName => []],
         ];
 
-        $indexConfig = ArrayList::create(SearchConfig::config()->get('indices'))
-                        ->find('name', $this->clientIndexName);
+        $indexConfig = ArrayList::create(SearchConfig::indices())
+            ->find('name', $this->clientIndexName);
 
         if (!empty($indexConfig['attributesForFaceting'])) {
-            $data['facets'] = [$indexName => $indexConfig['attributesForFaceting']];
+            //$data['facet'] = [$indexName => $indexConfig['attributesForFaceting']];
         }
 
         $this->rawQuery['uri'] = $url;
@@ -329,9 +301,10 @@ class SolrClient implements SearchClientAdaptor, DataWriter, DataSearcher
         $response['body'] = $stream->getContents();
 
         $this->response = json_decode($response['body'], true);
-        $this->response['_total'] = $this->response['record_count'];
+        Debug::dump($this->response);
+        //$this->response['_total'] = $this->response['record_count'];
 
-        return new ArrayList($this->response['records'][$indexName]);
+        //return new ArrayList($this->response['records'][$indexName]);
     }
 
     public function getResponse()

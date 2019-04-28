@@ -72,7 +72,7 @@ class DeleteRecord extends AbstractQueuedJob implements QueuedJob
     public function createClient($client = null)
     {
         if (!$client) {
-            $this->client = ElasticClient::create();
+            $this->client = SolrClient::create();
         }
 
         $this->client->initIndex($this->indexName);

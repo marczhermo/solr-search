@@ -16,6 +16,4 @@ Marcz\Search\Config:
       delete: true
       export: 'json'
       class: 'Marcz\Solr\SolrClient'
-Marcz\Search\Processor\Exporter:
-  extensions:
-    - Marcz\Solr\Extensions\Exporter
+
